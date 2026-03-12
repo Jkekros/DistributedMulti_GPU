@@ -80,7 +80,7 @@ log "Configuring ROCm environment..."
 
 cat <<'EOF' > /etc/profile.d/rocm-wsl.sh
 export PATH=$PATH:/opt/rocm/bin:/opt/rocm/opencl/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib:/opt/rocm/lib64
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/rocm/lib:/opt/rocm/lib64
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export HIP_VISIBLE_DEVICES=0
 EOF
@@ -165,7 +165,7 @@ cat <<'BOOT_EOF' > /home/${REAL_USER}/start_cluster_services.sh
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export HIP_VISIBLE_DEVICES=0
 export PATH=$PATH:/opt/rocm/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib:/opt/rocm/lib64
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/opt/rocm/lib:/opt/rocm/lib64
 
 # Start SSH
 sudo service ssh start 2>/dev/null || sudo /usr/sbin/sshd 2>/dev/null || true
