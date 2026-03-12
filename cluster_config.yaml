@@ -1,7 +1,7 @@
 # ============================================================
 # Heterogeneous Multi-Node GPU Cluster Configuration
 # Master: 1x NVIDIA RTX 5090 (CUDA) — Windows native
-# Workers: 3x AMD RX 7900 XTX (ROCm) — WSL2 Ubuntu
+# Workers: 3x AMD RX 7900 XTX (DirectML) — Windows native
 # Total: 4 GPUs unified via PyTorch Distributed (gloo backend)
 # ============================================================
 
@@ -22,45 +22,42 @@ cluster:
     os: "windows"
 
   # 3 worker nodes, each with 1 AMD RX 7900 XTX
-  # Each runs WSL2 (Ubuntu 22.04) with ROCm for GPU access
+  # Each runs Windows natively with DirectML
   workers:
     - hostname: "worker-1"
       ip: "192.168.0.171"
       gpu_type: "rx7900xtx"
-      gpu_backend: "rocm"
+      gpu_backend: "directml"
       gpu_id: 0
       vram_gb: 24
-      os: "wsl2"
+      os: "windows"
     - hostname: "worker-2"
       ip: "192.168.0.172"
       gpu_type: "rx7900xtx"
-      gpu_backend: "rocm"
+      gpu_backend: "directml"
       gpu_id: 0
       vram_gb: 24
-      os: "wsl2"
+      os: "windows"
     - hostname: "worker-3"
       ip: "192.168.0.174"
       gpu_type: "rx7900xtx"
-      gpu_backend: "rocm"
+      gpu_backend: "directml"
       gpu_id: 0
       vram_gb: 24
-      os: "wsl2"
+      os: "windows"
 
 # Network settings
 network:
-  # WSL2 uses the Windows host IP for network traffic
-  # Workers bind to 0.0.0.0 inside WSL2; Windows forwards via NAT
-  interface: "eth0"           # WSL2 virtual interface name
-  backend: "gloo"             # MUST be gloo for mixed CUDA + ROCm
+  interface: "Ethernet"       # Windows network interface name
+  backend: "gloo"             # MUST be gloo for mixed CUDA + DirectML
 
-# ROCm settings (applied on worker nodes inside WSL2)
-rocm:
-  hsa_override_gfx_version: "11.0.0"   # Required for RX 7900 XTX (gfx1100)
-  hip_visible_devices: "0"
-
-# CUDA settings (applied on master node, Windows native)
+# CUDA settings (applied on master node)
 cuda:
   cuda_visible_devices: "0"
+
+# DirectML settings (applied on worker nodes)
+directml:
+  device_index: 0             # DirectML device index (0 = first GPU)
 
 # Training defaults
 training:
@@ -90,8 +87,7 @@ comfyui:
   # Shared model/checkpoint storage
   # All nodes should have access to the same models
   # Options: network share (SMB/NFS), or sync models to each node
-  models_path: "C:\\ComfyUI\\models"           # Windows path (master)
-  models_path_wsl: "/mnt/c/ComfyUI/models"    # WSL2 path (workers)
+  models_path: "C:\\ComfyUI\\models"           # Windows path (all nodes)
   
   # Model sharding (for models too large for one GPU)
   sharding:

@@ -1,6 +1,6 @@
 # Mixed GPU Cluster: RTX 5090 + 3x RX 7900 XTX (Windows)
 
-Distributed PyTorch cluster unifying **1 NVIDIA RTX 5090** (master, Windows + CUDA) with **3 AMD RX 7900 XTX** (workers, Windows + WSL2 + ROCm) as a single compute fabric.
+Distributed PyTorch cluster unifying **1 NVIDIA RTX 5090** (master, CUDA) with **3 AMD RX 7900 XTX** (workers, DirectML) — all running **natively on Windows**.
 
 ## Architecture
 
@@ -8,7 +8,7 @@ Distributed PyTorch cluster unifying **1 NVIDIA RTX 5090** (master, Windows + CU
 ┌─────────────────────────────────────────────────┐
 │              MASTER (Rank 0)                     │
 │         NVIDIA RTX 5090 — 32 GB VRAM            │
-│     Windows Native │ PyTorch + CUDA              │
+│         Windows │ PyTorch + CUDA                 │
 │           IP: 192.168.0.15:29500                │
 └────────────┬──────────┬──────────┬──────────────┘
              │          │          │
@@ -18,20 +18,19 @@ Distributed PyTorch cluster unifying **1 NVIDIA RTX 5090** (master, Windows + CU
 │  Worker 1   │ │  Worker 2  │ │   Worker 3   │
 │  Rank 1     │ │  Rank 2    │ │   Rank 3     │
 │  7900 XTX   │ │  7900 XTX  │ │   7900 XTX   │
-│  WSL2+ROCm  │ │  WSL2+ROCm │ │   WSL2+ROCm  │
+│  DirectML   │ │  DirectML  │ │   DirectML   │
 │  24 GB VRAM │ │  24 GB     │ │   24 GB      │
 │  .0.171     │ │  .0.172    │ │   .0.174     │
 └─────────────┘ └────────────┘ └──────────────┘
 ```
 
-**Total VRAM: 32 + (3 × 24) = 104 GB**
+**Total VRAM: 32 + (3 x 24) = 104 GB**
 
 ## How It Works
 
-- **Backend: `gloo`** — the only PyTorch distributed backend that works across both CUDA and ROCm
-- **Master:** Windows native with CUDA PyTorch (RTX 5090)
-- **Workers:** Windows + WSL2 (Ubuntu 22.04) with ROCm PyTorch (RX 7900 XTX)
-- PyTorch's `torch.cuda` API works for both NVIDIA (CUDA) and AMD (ROCm via HIP)
+- **Backend: `gloo`** — the only PyTorch distributed backend that works across CUDA and DirectML
+- **Master:** Windows with CUDA PyTorch (RTX 5090)
+- **Workers:** Windows with `torch-directml` (RX 7900 XTX)
 - Cross-vendor gradient sync goes through **CPU-staged tensor transfers**:
   GPU → CPU → gloo all-reduce → CPU → GPU
 - The `MixedClusterDDP` wrapper in `distributed_train.py` handles this automatically
@@ -42,16 +41,15 @@ Distributed PyTorch cluster unifying **1 NVIDIA RTX 5090** (master, Windows + CU
 |------|---------------|---------|
 | `cluster_config.yaml` | — | IPs, ports, GPU types, training params |
 | `setup_master.ps1` | Master (PowerShell) | Install CUDA PyTorch on Windows |
-| `setup_worker.ps1` | Workers (PowerShell) | Install WSL2, configure GPU passthrough |
-| `setup_worker_wsl.sh` | Workers (inside WSL2) | Install ROCm + PyTorch in WSL2 |
+| `setup_worker.ps1` | Workers (PowerShell) | Install DirectML PyTorch on Windows |
 | `launch_master.ps1` | Master (PowerShell) | Start rank 0 training |
-| `launch_worker.sh` | Workers (inside WSL2) | Start rank 1-3 training |
-| `launch_cluster.ps1` | Master (PowerShell) | One-click: SSH → WSL2 workers + start master |
+| `launch_worker.ps1` | Workers (PowerShell) | Start rank 1-3 training |
+| `launch_cluster.ps1` | Master (PowerShell) | One-click: SSH to workers + start master |
 | `distributed_train.py` | All nodes | Training with mixed-vendor DDP |
 | `health_check.py` | Master | Verify nodes, GPUs, connectivity |
 | **ComfyUI** | | |
 | `setup_comfy_master.ps1` | Master (PowerShell) | Install ComfyUI + balancer deps on master |
-| `setup_comfy_worker.sh` | Workers (inside WSL2) | Install ComfyUI in WSL2, link models |
+| `setup_comfy_worker.ps1` | Workers (PowerShell) | Install ComfyUI + DirectML on workers |
 | `launch_comfy_cluster.ps1` | Master (PowerShell) | One-click ComfyUI cluster launch |
 | `comfy_balancer.py` | Master | Load balancer across all ComfyUI nodes |
 | `model_shard_coordinator.py` | Master | Coordinate model sharding across GPUs |
@@ -91,20 +89,17 @@ On each AMD worker, open PowerShell **as Administrator**:
 ```
 
 This installs:
-- WSL2 with Ubuntu 22.04
-- GPU passthrough configuration
-- Port forwarding (Windows → WSL2)
-- Then automatically runs `setup_worker_wsl.sh` inside WSL2 to install ROCm + PyTorch
+- Python venv with PyTorch + `torch-directml`
+- Windows Firewall rules
+- OpenSSH Server
 
-**After first run, reboot and run again** (first run enables WSL2, second run installs Ubuntu + ROCm).
+### 4. Verify GPU on Workers
 
-### 4. Verify GPU in WSL2 (on each worker)
-
-After reboot:
+On each worker, in PowerShell:
 ```powershell
-wsl -d Ubuntu-22.04 -- rocminfo
+& "$env:USERPROFILE\gpu-cluster-env\Scripts\Activate.ps1"
+python -c "import torch_directml; print(torch_directml.device())"
 ```
-You should see your RX 7900 XTX listed.
 
 ### 5. Configure SSH
 
@@ -113,7 +108,7 @@ From master, set up SSH keys to each worker:
 # Generate key if needed
 ssh-keygen -t rsa -b 4096
 
-# Copy to each worker (SSH must be enabled on workers)
+# Copy to each worker
 type $env:USERPROFILE\.ssh\id_rsa.pub | ssh user@192.168.0.171 "cat >> .ssh/authorized_keys"
 type $env:USERPROFILE\.ssh\id_rsa.pub | ssh user@192.168.0.172 "cat >> .ssh/authorized_keys"
 type $env:USERPROFILE\.ssh\id_rsa.pub | ssh user@192.168.0.174 "cat >> .ssh/authorized_keys"
@@ -133,7 +128,7 @@ python health_check.py --ssh-user your_username
 ```powershell
 .\launch_cluster.ps1
 ```
-This SSHes into all workers, launches WSL2 training processes, and starts the master locally.
+This SSHes into all workers, launches training, and starts the master locally.
 
 **Option B — Manual launch:**
 
@@ -142,39 +137,11 @@ On master (PowerShell):
 .\launch_master.ps1
 ```
 
-On each worker (open WSL2 terminal):
-```bash
-cd /mnt/c/path/to/DistributedMulti_GPU
-bash launch_worker.sh 1   # worker 1
-bash launch_worker.sh 2   # worker 2
-bash launch_worker.sh 3   # worker 3
-```
-
-## WSL2 Networking Notes
-
-### Port Forwarding
-WSL2 uses NAT networking — it has its own internal IP. `setup_worker.ps1` configures
-Windows port forwarding so the master can reach SOCm services inside WSL2:
-
-```
-Master → Worker Windows IP (192.168.0.171:29500)
-    → WSL2 port forward → Ubuntu (172.x.x.x:29500)
-```
-
-### WSL2 IP Changes on Reboot
-WSL2 gets a new internal IP each time Windows reboots. The port forwarding in
-`setup_worker.ps1` needs to be refreshed after each reboot. You can run:
+On each worker (PowerShell):
 ```powershell
-# On each worker after reboot:
-$wslIp = wsl -d Ubuntu-22.04 -- hostname -I
-$wslIp = $wslIp.Trim().Split(" ")[0]
-netsh interface portproxy add v4tov4 listenport=29500 listenaddress=0.0.0.0 connectport=29500 connectaddress=$wslIp
-```
-
-### Start WSL2 Services After Reboot
-On each worker after reboot:
-```powershell
-wsl -d Ubuntu-22.04 -- bash ~/start_cluster_services.sh
+.\launch_worker.ps1 -Rank 1   # worker 1
+.\launch_worker.ps1 -Rank 2   # worker 2
+.\launch_worker.ps1 -Rank 3   # worker 3
 ```
 
 ## Performance Notes
@@ -188,6 +155,12 @@ GPU compute → gradients → copy to CPU → gloo all-reduce → copy back to G
 - **1 GbE**: ~125 MB/s — most time spent on gradient sync
 - **10 GbE**: ~1.25 GB/s — practical for medium models
 - **25/40 GbE**: Ideal
+
+### DirectML Considerations
+- DirectML has slightly higher overhead than native CUDA or ROCm
+- Works with any DirectX 12 GPU — no special driver needed beyond standard AMD Adrenalin
+- Some PyTorch ops may fall back to CPU; this is handled automatically
+- Best for inference workloads (ComfyUI); training sync adds overhead
 
 ### Tips for Best Performance
 1. **Larger batch sizes** — amortize communication overhead
@@ -206,15 +179,14 @@ model = MixedClusterDDP(model, device, world_size)
 
 | Issue | Solution |
 |-------|----------|
-| `rocminfo` shows nothing in WSL2 | Reboot Windows; install latest AMD Adrenalin driver |
-| `Connection refused` on workers | Ensure port forwarding is set up; check WSL2 is running |
-| WSL2 IP changed after reboot | Re-run port forwarding (see WSL2 Networking Notes) |
-| `HSA_STATUS_ERROR` in WSL2 | Ensure `HSA_OVERRIDE_GFX_VERSION=11.0.0` is set |
+| `torch_directml` import fails | Run: `pip install torch-directml` |
+| `Connection refused` on workers | Check firewall rules; ensure SSH is running |
 | Workers hang at init | Master must start first; check firewall on all machines |
 | Slow training | Check network: `iperf3` between nodes; use wired Ethernet |
 | `No module named yaml` | Activate venv: `& ~\gpu-cluster-env\Scripts\Activate.ps1` |
-| Can't SSH to workers | Enable OpenSSH Server: `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0` |
+| Can't SSH to workers | Enable OpenSSH: `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0` |
 | PowerShell execution policy | Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
+| DirectML device not found | Update AMD Adrenalin driver to latest version |
 
 ---
 
@@ -237,6 +209,7 @@ Run ComfyUI across all 4 GPUs — the load balancer distributes generation work 
   ▼           ▼   ▼           ▼
 Master:8188  W1  W2          W3
 RTX 5090   7900XTX  7900XTX  7900XTX
+  CUDA     DirectML DirectML DirectML
  32GB       24GB     24GB     24GB
 ```
 
@@ -247,25 +220,21 @@ RTX 5090   7900XTX  7900XTX  7900XTX
 .\setup_comfy_master.ps1
 ```
 
-**2. Setup workers (inside WSL2 on each worker):**
-```bash
-cd ~/DistributedMulti_GPU
-bash setup_comfy_worker.sh
+**2. Setup workers (PowerShell as Admin on each worker):**
+```powershell
+.\setup_comfy_worker.ps1
 ```
 
 **3. Install the custom cluster node on all nodes:**
 ```powershell
-# On master (Windows):
+# On master and each worker:
 Copy-Item comfy_cluster_node.py C:\ComfyUI\custom_nodes\comfy_cluster_node.py
-
-# On workers (inside WSL2):
-cp comfy_cluster_node.py ~/ComfyUI/custom_nodes/comfy_cluster_node.py
 ```
 
 **4. Share models across all nodes.**
 All machines need access to the same checkpoint files. Options:
-- **SMB/NFS share**: Mount a network drive on all nodes
-- **Manual copy**: Copy models to `C:\ComfyUI\models\` on each machine (WSL2 accesses via `/mnt/c/ComfyUI/models/`)
+- **SMB share**: Share `C:\ComfyUI\models\` from master, map as network drive on workers
+- **Manual copy**: Copy models to `C:\ComfyUI\models\` on each machine
 
 ### Launch ComfyUI Cluster
 
@@ -275,7 +244,7 @@ From the master, one command starts everything:
 ```
 
 This starts:
-1. ComfyUI on each worker (via SSH → WSL2)
+1. ComfyUI on each worker (via SSH)
 2. Shard coordinator on master (port 29600)
 3. ComfyUI on master (port 8188)
 4. Load balancer (port 8100)

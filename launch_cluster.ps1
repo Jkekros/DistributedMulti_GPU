@@ -1,6 +1,7 @@
 # ============================================================
 # Launch Entire Cluster from Master (Windows PowerShell)
-# Starts WSL2 workers remotely via SSH, then starts master
+# Starts workers remotely via SSH, then starts master
+# All nodes run Windows natively (CUDA on master, DirectML on workers)
 # Usage: .\launch_cluster.ps1 [script.py]
 # ============================================================
 
@@ -37,15 +38,14 @@ if (-not $SshUser) {
     $SshUser = $env:USERNAME
 }
 
-# Determine project path inside WSL2 on workers
-# Workers need the project files copied to their WSL2 filesystem
-$WslProjectDir = "~/DistributedMulti_GPU"
+# Project path on workers (same structure as master)
+$WorkerProjectDir = "DistributedMulti_GPU"
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Launching GPU Cluster" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Master:      $($config.master_ip) (RTX 5090, Windows)"
-Write-Host "  Workers:     $($workerIps -join ', ') (RX 7900 XTX, WSL2)"
+Write-Host "  Master:      $($config.master_ip) (RTX 5090, CUDA)"
+Write-Host "  Workers:     $($workerIps -join ', ') (RX 7900 XTX, DirectML)"
 Write-Host "  World Size:  $($config.world_size)"
 Write-Host "  Script:      $Script"
 Write-Host "  SSH User:    $SshUser"
@@ -53,25 +53,22 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
 # -----------------------------------------------------------
-# Start each worker via SSH -> WSL2
+# Start each worker via SSH (Windows to Windows)
 # -----------------------------------------------------------
 $workerJobs = @()
 $rank = 1
 
 foreach ($ip in $workerIps) {
-    Write-Host "[Cluster] Starting rank $rank on $ip (via SSH -> WSL2)..." -ForegroundColor Yellow
-    
-    # SSH into the Windows machine, then invoke WSL2 to run the worker
-    # The worker machines run SSH on Windows, then we call wsl to enter Ubuntu
-    $sshCmd = "cd $WslProjectDir && bash launch_worker.sh $rank $Script"
-    
-    # Start as background job
+    Write-Host "[Cluster] Starting rank $rank on $ip (via SSH)..." -ForegroundColor Yellow
+
+    # SSH into the worker's Windows and run launch_worker.ps1
     $job = Start-Job -ScriptBlock {
-        param($user, $ip, $cmd)
-        # SSH into the worker's Windows, then run inside WSL2
-        & ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${user}@${ip}" "wsl -d Ubuntu-22.04 -- bash -ic '$cmd'"
-    } -ArgumentList $SshUser, $ip, $sshCmd
-    
+        param($user, $ip, $rank, $script, $projectDir)
+        & ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 `
+            "${user}@${ip}" `
+            "cd $projectDir; powershell -ExecutionPolicy Bypass -File launch_worker.ps1 -Rank $rank -Script $script"
+    } -ArgumentList $SshUser, $ip, $rank, $Script, $WorkerProjectDir
+
     $workerJobs += $job
     $rank++
 }

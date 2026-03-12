@@ -2,12 +2,12 @@
 ============================================================
 Distributed Training Script — Heterogeneous GPU Cluster
 Master: NVIDIA RTX 5090 (CUDA, Windows native)
-Workers: AMD RX 7900 XTX (ROCm, WSL2 Ubuntu)
+Workers: AMD RX 7900 XTX (DirectML, Windows native)
 Backend: gloo (the only backend supporting mixed vendors)
 
 This script:
   1. Initializes PyTorch distributed with gloo backend
-  2. Detects whether running on CUDA or ROCm automatically
+  2. Detects whether running on CUDA or DirectML automatically
   3. Shards model + data across all 4 GPUs (1 master + 3 workers)
   4. Handles CPU-mediated tensor transfers for cross-vendor comms
   5. Includes a demo training loop you can replace with your model
@@ -35,35 +35,40 @@ from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 # ============================================================
 def detect_gpu_backend():
     """
-    Detect whether this node has CUDA (NVIDIA) or ROCm (AMD).
-    PyTorch ROCm maps to torch.cuda API, so we distinguish
-    by checking for NVIDIA vs AMD device names.
+    Detect whether this node has CUDA (NVIDIA) or DirectML (AMD).
+    - CUDA: RTX 5090 on master — use torch.device("cuda:0")
+    - DirectML: RX 7900 XTX on workers — use torch_directml.device()
     """
-    if not torch.cuda.is_available():
-        print("[WARN] No GPU detected — falling back to CPU")
-        return "cpu", torch.device("cpu")
+    # Try CUDA first (NVIDIA)
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0).lower()
+        if "nvidia" in device_name or "geforce" in device_name or "rtx" in device_name:
+            return "cuda", torch.device("cuda:0")
 
-    device_name = torch.cuda.get_device_name(0).lower()
-    if "nvidia" in device_name or "geforce" in device_name or "rtx" in device_name:
-        backend = "cuda"
-    else:
-        # AMD GPUs show up as e.g. "Radeon RX 7900 XTX" via ROCm
-        backend = "rocm"
+    # Try DirectML (AMD on Windows)
+    try:
+        import torch_directml
+        dml_device = torch_directml.device()
+        # Verify it actually works
+        test = torch.randn(2, 2).to(dml_device)
+        _ = test @ test.T
+        return "directml", dml_device
+    except (ImportError, Exception):
+        pass
 
-    device = torch.device("cuda:0")
-    return backend, device
+    print("[WARN] No GPU detected — falling back to CPU")
+    return "cpu", torch.device("cpu")
 
 
 # ============================================================
 # Gloo-Safe Collective Operations
 # ============================================================
-# Gloo backend does NOT support GPU tensors directly for all ops
-# in mixed-vendor setups. We move to CPU for collectives, then
-# back to GPU for compute. This is the key to making mixed
-# CUDA + ROCm clusters work.
+# Gloo backend does NOT support GPU tensors directly.
+# We move to CPU for collectives, then back to GPU for compute.
+# This is the key to making mixed CUDA + DirectML clusters work.
 
 def safe_all_reduce(tensor, op=dist.ReduceOp.SUM):
-    """All-reduce that works across CUDA + ROCm via CPU staging."""
+    """All-reduce that works across CUDA + DirectML via CPU staging."""
     cpu_tensor = tensor.detach().cpu()
     dist.all_reduce(cpu_tensor, op=op)
     tensor.data.copy_(cpu_tensor.to(tensor.device))
@@ -71,7 +76,7 @@ def safe_all_reduce(tensor, op=dist.ReduceOp.SUM):
 
 
 def safe_broadcast(tensor, src=0):
-    """Broadcast that works across CUDA + ROCm via CPU staging."""
+    """Broadcast that works across CUDA + DirectML via CPU staging."""
     cpu_tensor = tensor.detach().cpu()
     dist.broadcast(cpu_tensor, src=src)
     tensor.data.copy_(cpu_tensor.to(tensor.device))
@@ -79,7 +84,7 @@ def safe_broadcast(tensor, src=0):
 
 
 def safe_all_gather(tensor_list, tensor):
-    """All-gather that works across CUDA + ROCm via CPU staging."""
+    """All-gather that works across CUDA + DirectML via CPU staging."""
     cpu_tensor = tensor.detach().cpu()
     cpu_list = [torch.zeros_like(cpu_tensor) for _ in tensor_list]
     dist.all_gather(cpu_list, cpu_tensor)
@@ -194,7 +199,7 @@ def train(args):
     hostname = socket.gethostname()
 
     print(f"[Rank {args.rank}] {hostname} | GPU backend: {gpu_backend} | "
-          f"Device: {device} | GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+          f"Device: {device} | GPU: {torch.cuda.get_device_name(0) if gpu_backend == 'cuda' else gpu_backend}")
 
     # ------ Create model ------
     model = DemoModel().to(device)

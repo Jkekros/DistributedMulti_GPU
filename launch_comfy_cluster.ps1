@@ -1,6 +1,6 @@
 # ============================================================
 # Launch ComfyUI Cluster from Master (Windows PowerShell)
-# Starts ComfyUI on all worker nodes via SSH->WSL2,
+# Starts ComfyUI on all worker nodes via SSH (Windows to Windows),
 # starts ComfyUI on master, starts load balancer + shard coordinator
 # Usage: .\launch_comfy_cluster.ps1
 # ============================================================
@@ -18,7 +18,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # ---- Load config ----
 $configRaw = python -c @"
-import yaml, json, sys
+import yaml, json
 with open(r'$ScriptDir\cluster_config.yaml') as f:
     cfg = yaml.safe_load(f)
 workers = [w['ip'] for w in cfg['cluster']['workers']]
@@ -33,7 +33,6 @@ print(json.dumps({
     'coordinator_port': sharding.get('coordinator_port', 29600),
     'sharding_enabled': sharding.get('enabled', False),
     'models_path': comfy.get('models_path', 'C:\\\\ComfyUI\\\\models'),
-    'models_path_wsl': comfy.get('models_path_wsl', '/mnt/c/ComfyUI/models'),
 }))
 "@
 
@@ -44,14 +43,13 @@ if (-not $SshUser) {
     $SshUser = $env:USERNAME
 }
 
-$ComfyDirMaster = "C:\ComfyUI"
-$ComfyDirWSL    = "~/ComfyUI"
+$ComfyDir = "C:\ComfyUI"
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  ComfyUI GPU Cluster Launcher" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Master:       $($config.master_ip) (RTX 5090)"
-Write-Host "  Workers:      $($workerIps -join ', ') (RX 7900 XTX)"
+Write-Host "  Master:       $($config.master_ip) (RTX 5090, CUDA)"
+Write-Host "  Workers:      $($workerIps -join ', ') (RX 7900 XTX, DirectML)"
 Write-Host "  Balancer:     http://$($config.master_ip):$($config.balancer_port)"
 Write-Host "  Dashboard:    http://$($config.master_ip):$($config.balancer_port)/cluster"
 Write-Host "  Sharding:     $(if ($config.sharding_enabled -and -not $NoSharding) {'Enabled'} else {'Disabled'})"
@@ -61,7 +59,7 @@ Write-Host ""
 $allJobs = @()
 
 # ============================================================
-# 1. Start ComfyUI on worker nodes (WSL2)
+# 1. Start ComfyUI on worker nodes (Windows native via SSH)
 # ============================================================
 if (-not $MasterOnly) {
     $rank = 1
@@ -69,21 +67,13 @@ if (-not $MasterOnly) {
         $workerPort = $config.worker_comfy_ports[$rank - 1]
         Write-Host "[ComfyUI] Starting worker rank $rank at $ip`:$workerPort ..." -ForegroundColor Yellow
 
-        $wslCmd = @"
-export HSA_OVERRIDE_GFX_VERSION=11.0.0
-export HIP_VISIBLE_DEVICES=0
-export CLUSTER_RANK=$rank
-export CLUSTER_COORDINATOR_URL=http://$($config.master_ip):$($config.coordinator_port)
-cd $ComfyDirWSL
-source venv/bin/activate 2>/dev/null || true
-python main.py --listen 0.0.0.0 --port $workerPort --preview-method auto
-"@
+        $sshCmd = "cd $ComfyDir && set CLUSTER_RANK=$rank && set CLUSTER_COORDINATOR_URL=http://$($config.master_ip):$($config.coordinator_port) && python main.py --listen 0.0.0.0 --port $workerPort --preview-method auto"
 
         $job = Start-Job -ScriptBlock {
             param($user, $ip, $cmd)
             & ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 `
-                "${user}@${ip}" "wsl -d Ubuntu-22.04 -- bash -ic '$cmd'"
-        } -ArgumentList $SshUser, $ip, ($wslCmd -replace "`n", " && ")
+                "${user}@${ip}" $cmd
+        } -ArgumentList $SshUser, $ip, $sshCmd
 
         $allJobs += @{ Job=$job; Name="Worker-$rank ($ip)" }
         $rank++
@@ -113,7 +103,7 @@ if ($config.sharding_enabled -and -not $NoSharding) {
 }
 
 # ============================================================
-# 3. Start ComfyUI on master node (Windows native)
+# 3. Start ComfyUI on master node (Windows native, CUDA)
 # ============================================================
 if (-not $WorkersOnly) {
     Write-Host "[ComfyUI] Starting master ComfyUI on port $($config.master_comfy_port)..." -ForegroundColor Yellow
@@ -125,7 +115,7 @@ if (-not $WorkersOnly) {
         param($comfyDir, $port)
         Set-Location $comfyDir
         & python main.py --listen 0.0.0.0 --port $port --preview-method auto
-    } -ArgumentList $ComfyDirMaster, $config.master_comfy_port
+    } -ArgumentList $ComfyDir, $config.master_comfy_port
 
     $allJobs += @{ Job=$masterJob; Name="MasterComfyUI" }
 
@@ -180,7 +170,6 @@ Write-Host ""
 # ============================================================
 try {
     while ($true) {
-        # Check if any job has failed
         foreach ($entry in $allJobs) {
             $j = $entry.Job
             if ($j.State -eq "Failed") {
@@ -192,7 +181,6 @@ try {
     }
 }
 finally {
-    # Clean up all jobs on exit
     Write-Host ""
     Write-Host "[Cluster] Shutting down all services..." -ForegroundColor Yellow
 

@@ -3,7 +3,7 @@
 Cluster Health Check & Monitoring
 Run from the master (Windows, RTX 5090) to verify all nodes
 are reachable, GPUs are functional, and cluster is ready.
-Workers: Windows + WSL2 + ROCm (RX 7900 XTX)
+Workers: Windows + DirectML (RX 7900 XTX)
 ============================================================
 """
 
@@ -52,57 +52,54 @@ def check_node_ssh(ip, user, timeout=10):
         client.connect(ip, username=user, timeout=timeout)
 
         # Detect GPU type
-        # Try nvidia-smi first (CUDA), then rocm-smi (ROCm)
+        # Try nvidia-smi first (CUDA), then DirectML (AMD)
         gpu_info = None
 
         # NVIDIA check
         stdin, stdout, stderr = client.exec_command(
-            "nvidia-smi --query-gpu=name,memory.total,temperature.gpu --format=csv,noheader 2>/dev/null"
+            "nvidia-smi --query-gpu=name,memory.total,temperature.gpu --format=csv,noheader 2>NUL"
         )
         nvidia_output = stdout.read().decode().strip()
         if nvidia_output:
             gpu_info = {"type": "cuda", "details": nvidia_output}
 
-        # ROCm check via WSL2 (workers run ROCm inside WSL2)
+        # DirectML check (AMD GPU on Windows)
         if not gpu_info:
-            # Try direct rocm-smi first (if SSH goes into WSL2)
+            # Check for AMD GPU via PowerShell
             stdin, stdout, stderr = client.exec_command(
-                "rocm-smi --showproductname --showmeminfo vram --showtemp 2>/dev/null | head -20"
+                'powershell -Command "Get-CimInstance Win32_VideoController | '
+                'Where-Object {$_.Name -match \'AMD|Radeon\'} | '
+                'Select-Object -ExpandProperty Name"'
             )
-            rocm_output = stdout.read().decode().strip()
-            if rocm_output:
-                gpu_info = {"type": "rocm", "details": rocm_output}
+            amd_output = stdout.read().decode().strip()
+            if amd_output:
+                gpu_info = {"type": "directml", "details": amd_output}
 
-        # If SSH landed on Windows, try via wsl command
-        if not gpu_info:
-            stdin, stdout, stderr = client.exec_command(
-                'wsl -d Ubuntu-22.04 -- bash -c "rocminfo 2>/dev/null | grep \"Marketing Name\"" 2>/dev/null'
-            )
-            wsl_output = stdout.read().decode().strip()
-            if wsl_output:
-                gpu_info = {"type": "rocm-wsl2", "details": wsl_output}
-
-        # Check PyTorch (try WSL2 path, then direct)
+        # Check PyTorch + DirectML
         pytorch_info = ""
         for cmd in [
-            'wsl -d Ubuntu-22.04 -- bash -c "source ~/gpu-cluster-env/bin/activate && '
-            'python3 -c \"import torch; print(f\'torch={torch.__version__},cuda={torch.cuda.is_available()},'
-            'gpus={torch.cuda.device_count()}\')\"" 2>/dev/null',
-            "source ~/gpu-cluster-env/bin/activate && python3 -c \"import torch; "
-            "print(f'torch={torch.__version__},cuda={torch.cuda.is_available()},"
-            "gpus={torch.cuda.device_count()}')\" 2>/dev/null"
+            '"%%USERPROFILE%%\\gpu-cluster-env\\Scripts\\python.exe" -c '
+            '"import torch; '
+            'dml=False; '
+            'exec(\'try:\\n import torch_directml; dml=True\\nexcept: pass\'); '
+            'print(f\'torch={torch.__version__},cuda={torch.cuda.is_available()},directml={dml}\')"',
         ]:
             stdin, stdout, stderr = client.exec_command(cmd)
             output = stdout.read().decode().strip()
-            if output:
+            if output and 'torch=' in output:
                 pytorch_info = output
                 break
 
         # System info
         stdin, stdout, stderr = client.exec_command(
-            "free -h | grep Mem | awk '{print $2}'"
+            'powershell -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB"'
         )
         ram = stdout.read().decode().strip()
+        if ram:
+            try:
+                ram = f"{float(ram):.0f} GB"
+            except ValueError:
+                pass
 
         stdin, stdout, stderr = client.exec_command("hostname")
         hostname = stdout.read().decode().strip()
@@ -127,7 +124,7 @@ def run_health_check(config_path, ssh_user=None):
     print("=" * 60)
     print("  GPU Cluster Health Check")
     print("  Master: RTX 5090 (CUDA, Windows)")
-    print("  Workers: RX 7900 XTX (ROCm, WSL2)")
+    print("  Workers: RX 7900 XTX (DirectML, Windows)")
     print("=" * 60)
     print()
 
@@ -213,7 +210,7 @@ def run_health_check(config_path, ssh_user=None):
     print(f"  Reachable (SSH):   {reachable}/{total}")
     num_workers = len(cluster.get('workers', []))
     print(f"  Master (CUDA):     1x RTX 5090 (Windows)")
-    print(f"  Workers (ROCm):    {num_workers}x RX 7900 XTX (WSL2)")
+    print(f"  Workers (DML):     {num_workers}x RX 7900 XTX (Windows + DirectML)")
     print(f"  Backend:           gloo")
     print(f"  World size:        {config['training']['world_size']}")
 
