@@ -1,0 +1,102 @@
+# ============================================================
+# Heterogeneous Multi-Node GPU Cluster Configuration
+# Master: 1x NVIDIA RTX 5090 (CUDA) — Windows native
+# Workers: 3x AMD RX 7900 XTX (ROCm) — WSL2 Ubuntu
+# Total: 4 GPUs unified via PyTorch Distributed (gloo backend)
+# ============================================================
+
+cluster:
+  name: "mixed-gpu-cluster"
+
+  # The master node — RTX 5090 machine, the "core" of the cluster
+  # Runs natively on Windows with CUDA
+  master:
+    hostname: "master"
+    ip: "192.168.0.15"
+    port: 29500               # PyTorch distributed rendezvous port
+    monitor_port: 8265        # Health monitoring dashboard
+    gpu_type: "rtx5090"
+    gpu_backend: "cuda"       # NVIDIA CUDA on Windows
+    gpu_id: 0
+    vram_gb: 32
+    os: "windows"
+
+  # 3 worker nodes, each with 1 AMD RX 7900 XTX
+  # Each runs WSL2 (Ubuntu 22.04) with ROCm for GPU access
+  workers:
+    - hostname: "worker-1"
+      ip: "192.168.0.171"
+      gpu_type: "rx7900xtx"
+      gpu_backend: "rocm"
+      gpu_id: 0
+      vram_gb: 24
+      os: "wsl2"
+    - hostname: "worker-2"
+      ip: "192.168.0.172"
+      gpu_type: "rx7900xtx"
+      gpu_backend: "rocm"
+      gpu_id: 0
+      vram_gb: 24
+      os: "wsl2"
+    - hostname: "worker-3"
+      ip: "192.168.0.174"
+      gpu_type: "rx7900xtx"
+      gpu_backend: "rocm"
+      gpu_id: 0
+      vram_gb: 24
+      os: "wsl2"
+
+# Network settings
+network:
+  # WSL2 uses the Windows host IP for network traffic
+  # Workers bind to 0.0.0.0 inside WSL2; Windows forwards via NAT
+  interface: "eth0"           # WSL2 virtual interface name
+  backend: "gloo"             # MUST be gloo for mixed CUDA + ROCm
+
+# ROCm settings (applied on worker nodes inside WSL2)
+rocm:
+  hsa_override_gfx_version: "11.0.0"   # Required for RX 7900 XTX (gfx1100)
+  hip_visible_devices: "0"
+
+# CUDA settings (applied on master node, Windows native)
+cuda:
+  cuda_visible_devices: "0"
+
+# Training defaults
+training:
+  world_size: 4           # Total GPUs: 1 (master) + 3 (workers)
+  nodes: 4                # Total machines
+  gpus_per_node: 1        # Each machine has 1 GPU
+  batch_size_per_gpu: 4   # Conservative; 7900 XTX=24GB, 5090=32GB
+  min_vram_gb: 24         # Bottleneck is smallest VRAM (7900 XTX)
+
+# ============================================================
+# ComfyUI Cluster Settings
+# ============================================================
+comfyui:
+  # Each node runs a ComfyUI instance on these ports
+  # Master acts as the load balancer, forwarding jobs to all nodes
+  base_port: 8188             # ComfyUI default port
+  master_comfy_port: 8188     # ComfyUI on master
+  worker_comfy_ports:
+    - 8188                    # Worker 1 ComfyUI port
+    - 8188                    # Worker 2 ComfyUI port
+    - 8188                    # Worker 3 ComfyUI port
+  
+  # Load balancer settings (runs on master)
+  balancer_port: 8100         # Connect to this port from your browser
+  strategy: "least_busy"      # Options: round_robin, least_busy, vram_aware
+  
+  # Shared model/checkpoint storage
+  # All nodes should have access to the same models
+  # Options: network share (SMB/NFS), or sync models to each node
+  models_path: "C:\\ComfyUI\\models"           # Windows path (master)
+  models_path_wsl: "/mnt/c/ComfyUI/models"    # WSL2 path (workers)
+  
+  # Model sharding (for models too large for one GPU)
+  sharding:
+    enabled: true
+    # Port for the sharding coordinator (separate from ComfyUI)
+    coordinator_port: 29600
+    # Max model size (GB) before auto-sharding kicks in
+    shard_threshold_gb: 20
